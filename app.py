@@ -1,18 +1,3 @@
-"""
-Fruit Ninja — OpenCV + MediaPipe Hand Tracking Edition
---------------------------------------------------------
-Move your index finger in front of your webcam to slice fruit.
-Avoid slicing bombs. Don't let fruit fall off the bottom of the screen.
-
-Controls:
-    Q  -  Quit
-    R  -  Restart (after Game Over)
-
-Run:
-    pip install opencv-python mediapipe numpy
-    python fruit_ninja_opencv.py
-"""
-
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -20,11 +5,13 @@ import random
 import time
 import math
 from collections import deque
+import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 
 # ----------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------
-WIDTH, HEIGHT = 960, 720
+WIDTH, HEIGHT = 640, 480  # Optimized web streaming size
 GRAVITY = 0.55
 TRAIL_LENGTH = 18
 MAX_LIVES = 3
@@ -41,12 +28,7 @@ FRUIT_CONFIG = {
 }
 FRUIT_WEIGHTS = {"apple": 3, "orange": 3, "watermelon": 2, "lemon": 3, "plum": 3, "bomb": 1}
 
-
-# ----------------------------------------------------------------------
-# Geometry helper
-# ----------------------------------------------------------------------
 def point_segment_distance(px, py, x1, y1, x2, y2):
-    """Shortest distance from point (px,py) to segment (x1,y1)-(x2,y2)."""
     dx, dy = x2 - x1, y2 - y1
     if dx == 0 and dy == 0:
         return math.hypot(px - x1, py - y1)
@@ -55,10 +37,6 @@ def point_segment_distance(px, py, x1, y1, x2, y2):
     cx, cy = x1 + t * dx, y1 + t * dy
     return math.hypot(px - cx, py - cy)
 
-
-# ----------------------------------------------------------------------
-# Game objects
-# ----------------------------------------------------------------------
 class Fruit:
     def __init__(self, kind):
         cfg = FRUIT_CONFIG[kind]
@@ -68,7 +46,6 @@ class Fruit:
         self.radius = cfg["radius"]
         self.points = cfg["points"]
         self.is_bomb = kind == "bomb"
-
         self.x = float(random.randint(self.radius + 30, WIDTH - self.radius - 30))
         self.y = float(HEIGHT + self.radius)
         self.vx = random.uniform(-3.0, 3.0)
@@ -104,14 +81,12 @@ class Fruit:
             cv2.ellipse(frame, hl, (int(self.radius * 0.28), int(self.radius * 0.16)),
                         30, 0, 360, (255, 255, 255), -1)
 
-
 class SliceHalf:
-    """Flying half of a sliced fruit."""
     def __init__(self, fruit, direction):
         self.x, self.y = fruit.x, fruit.y
         self.radius = fruit.radius
         self.color = fruit.color
-        self.direction = direction  # -1 = left half, 1 = right half
+        self.direction = direction
         self.vx = fruit.vx + direction * 4.5 + random.uniform(-1, 1)
         self.vy = fruit.vy - 4
         self.rotation = fruit.rotation
@@ -138,9 +113,7 @@ class SliceHalf:
                      start_angle, end_angle, self.color, -1)
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
-
 class Particle:
-    """Juice splash / explosion particle."""
     def __init__(self, x, y, color):
         angle = random.uniform(0, 2 * math.pi)
         speed = random.uniform(2, 9)
@@ -166,10 +139,6 @@ class Particle:
         cv2.circle(overlay, (int(self.x), int(self.y)), self.radius, self.color, -1)
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
-
-# ----------------------------------------------------------------------
-# Game state
-# ----------------------------------------------------------------------
 class Game:
     def __init__(self):
         self.reset()
@@ -183,7 +152,7 @@ class Game:
         self.last_spawn = time.time()
         self.spawn_interval = INITIAL_SPAWN_INTERVAL
         self.game_over = False
-        self.flash_timer = 0  # bomb explosion screen flash
+        self.flash_timer = 0
 
     def spawn_fruit(self):
         kinds = list(FRUIT_WEIGHTS.keys())
@@ -194,7 +163,6 @@ class Game:
     def update(self):
         if self.game_over:
             return
-
         now = time.time()
         if now - self.last_spawn > self.spawn_interval:
             self.spawn_fruit()
@@ -225,10 +193,8 @@ class Game:
             self.flash_timer -= 1
 
     def check_slice(self, trail_points):
-        """trail_points: list of (x,y) with None gaps removed already."""
         if self.game_over or len(trail_points) < 2:
             return
-
         to_slice = []
         for i in range(len(trail_points) - 1):
             ax, ay = trail_points[i]
@@ -239,7 +205,6 @@ class Game:
                 dist = point_segment_distance(f.x, f.y, ax, ay, bx, by)
                 if dist < f.radius:
                     to_slice.append(f)
-
         for f in to_slice:
             self.slice_fruit(f)
         if to_slice:
@@ -252,7 +217,6 @@ class Game:
             for _ in range(50):
                 self.particles.append(Particle(f.x, f.y, (0, 90, 255)))
             return
-
         self.score += f.points
         self.slice_halves.append(SliceHalf(f, -1))
         self.slice_halves.append(SliceHalf(f, 1))
@@ -266,16 +230,11 @@ class Game:
             s.draw(frame)
         for p in self.particles:
             p.draw(frame)
-
         if self.flash_timer > 0:
             overlay = frame.copy()
             overlay[:] = (0, 0, 255)
             cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
 
-
-# ----------------------------------------------------------------------
-# Hand tracking
-# ----------------------------------------------------------------------
 class HandTracker:
     def __init__(self, max_hands=1):
         self.mp_hands = mp.solutions.hands
@@ -284,10 +243,8 @@ class HandTracker:
             min_detection_confidence=0.65,
             min_tracking_confidence=0.5,
         )
-        self.mp_draw = mp.solutions.drawing_utils
 
     def get_fingertips(self, frame_bgr):
-        """Return a list of (x, y) index-fingertip pixel positions, one per detected hand."""
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
         results = self.hands.process(rgb)
@@ -302,10 +259,6 @@ class HandTracker:
     def close(self):
         self.hands.close()
 
-
-# ----------------------------------------------------------------------
-# Drawing helpers (trail + HUD)
-# ----------------------------------------------------------------------
 def draw_trail(frame, trail):
     pts = list(trail)
     n = len(pts)
@@ -319,12 +272,10 @@ def draw_trail(frame, trail):
             cv2.circle(frame, pts[i], 9, (255, 255, 255), -1)
             cv2.circle(frame, pts[i], 9, (255, 255, 100), 2)
 
-
 def draw_hud(frame, game):
     cv2.rectangle(frame, (0, 0), (WIDTH, 70), (0, 0, 0), -1)
     cv2.putText(frame, f"Score: {game.score}", (20, 46),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 2, cv2.LINE_AA)
-
     for i in range(MAX_LIVES):
         cx = WIDTH - 30 - i * 42
         color = (0, 0, 255) if i < game.lives else (60, 60, 60)
@@ -335,79 +286,60 @@ def draw_hud(frame, game):
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, 0), (WIDTH, HEIGHT), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        cv2.putText(frame, "GAME OVER", (WIDTH // 2 - 200, HEIGHT // 2 - 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4, cv2.LINE_AA)
-        cv2.putText(frame, f"Final Score: {game.score}", (WIDTH // 2 - 150, HEIGHT // 2 + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(frame, "Press 'R' to restart  or  'Q' to quit", (WIDTH // 2 - 260, HEIGHT // 2 + 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2, cv2.LINE_AA)
-
+        cv2.putText(frame, "GAME OVER", (WIDTH // 2 - 140, HEIGHT // 2 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3, cv2.LINE_AA)
+        cv2.putText(frame, "Click 'Stop' & 'Start' to Reset", (WIDTH // 2 - 190, HEIGHT // 2 + 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
 
 # ----------------------------------------------------------------------
-# Main
+# WebRTC Stream Engine
 # ----------------------------------------------------------------------
-def main():
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
-    if not cap.isOpened():
-        print("ERROR: Could not open webcam. Check that a camera is connected "
-              "and not in use by another application.")
-        return
+class FruitNinjaTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.tracker = HandTracker(max_hands=1)
+        self.game = Game()
+        self.trail = deque(maxlen=TRAIL_LENGTH)
+        self.prev_time = time.time()
 
-    tracker = HandTracker(max_hands=1)
-    game = Game()
-    trail = deque(maxlen=TRAIL_LENGTH)
+    def transform(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+        img = cv2.resize(img, (WIDTH, HEIGHT))
 
-    window_name = "Fruit Ninja - OpenCV Hand Tracking"
-    cv2.namedWindow(window_name)
+        tips = self.tracker.get_fingertips(img)
+        if tips:
+            self.trail.append(tips[0])
+        else:
+            self.trail.append(None)
 
-    prev_time = time.time()
+        self.game.update()
+        pts_only = [p for p in self.trail if p is not None]
+        self.game.check_slice(pts_only)
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Failed to grab frame from webcam.")
-                break
+        self.game.draw(img)
+        draw_trail(img, self.trail)
+        draw_hud(img, self.game)
 
-            frame = cv2.flip(frame, 1)
-            frame = cv2.resize(frame, (WIDTH, HEIGHT))
+        now = time.time()
+        fps = 1.0 / max(1e-6, (now - self.prev_time))
+        self.prev_time = now
+        cv2.putText(img, f"FPS: {int(fps)}", (20, HEIGHT - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1, cv2.LINE_AA)
 
-            tips = tracker.get_fingertips(frame)
-            if tips:
-                trail.append(tips[0])
-            else:
-                trail.append(None)
+        return img
 
-            game.update()
-            pts_only = [p for p in trail if p is not None]
-            game.check_slice(pts_only)
+# Streamlit Page Setup
+st.set_page_config(page_title="Fruit Ninja AI", layout="centered")
+st.title("🍓 Fruit Ninja — Web CV Edition")
+st.markdown("Allow camera access and slide your **index finger** over the screen to play!")
 
-            game.draw(frame)
-            draw_trail(frame, trail)
-            draw_hud(frame, game)
-
-            now = time.time()
-            fps = 1.0 / max(1e-6, (now - prev_time))
-            prev_time = now
-            cv2.putText(frame, f"FPS: {int(fps)}", (20, HEIGHT - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1, cv2.LINE_AA)
-
-            cv2.imshow(window_name, frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            if key == ord('r') and game.game_over:
-                game.reset()
-                trail.clear()
-
-    finally:
-        cap.release()
-        tracker.close()
-        cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    main()
+webrtc_streamer(
+    key="fruit-ninja",
+    video_transformer_factory=FruitNinjaTransformer,
+    rtc_configuration=RTC_CONFIGURATION,
+    media_stream_constraints={"video": True, "audio": False},
+)
