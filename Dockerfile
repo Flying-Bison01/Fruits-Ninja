@@ -21,4 +21,5 @@ COPY . .
 # We remove EXPOSE 8501 since Railway assigns ports dynamically
 
 # The string format allows the container shell to expand the $PORT variable correctly
-CMD streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT
+
+CMD streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT --server.enableCORS=false --server.enableXsrfProtection=false
